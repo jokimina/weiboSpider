@@ -7,6 +7,7 @@ import os
 import random
 import re
 import sys
+import copy
 import traceback
 from collections import OrderedDict
 from datetime import datetime, timedelta
@@ -17,9 +18,12 @@ from lxml import etree
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 
+keyword_list = ['可口可乐', '百事可乐', '王老吉', '加多宝', '苹果', '微软', '麦当劳', '汉堡王', '必胜客', '网易严选', '吉利汽车', '长城汽车', 'Jeep', '大众汽车', '宝马', '奔驰', '本田', '沃尔沃', '奥迪', '京东', '淘宝', '苏宁易购', '天猫', '摩拜', 'ofo', '海尔', '高德', '美的', '格力', '五芳斋', '故宫淘宝', '杜蕾斯', '百度', '苏宁']
+
 
 class Weibo(object):
-    cookie = {'Cookie': 'your cookie'}  # 将your cookie替换成自己的cookie
+    cookie = {
+        'Cookie': 'ALF=1575379311; SCF=AuhXT7Zx8EJhxfU_Y-U0cD1Zg-PknOX7j6Y31Plfd8-2MVWH0Y4rMhdAxEYcDCfSi8DsVlrKrJRxv8BPlY23w4Y.; SUBP=0033WrSXqPxfM725Ws9jqgMF55529P9D9WhKQ8m79OMu7M5GXTuLlykv5JpX5K-hUgL.Fo-4S0-ESo2XS0-2dJLoIpU3IJQLxKBLBonL12BLxKqL1KnLB-93Intt; SUB=_2A25wuqX_DeRhGeNH7FcT9i_IzDmIHXVQRMu3rDV6PUJbkdANLUnVkW1NSpMJ9JZZr1nUGa51uGqxF9CF3nEHs0ei; SUHB=0sqxW5IsOKqkMi; SSOLoginState=1572787631; MLOGIN=1; _T_WM=81534922471; WEIBOCN_FROM=1110006030; M_WEIBOCN_PARAMS=luicode%3D20000174%26uicode%3D20000174'}
 
     def __init__(self,
                  filter=0,
@@ -42,6 +46,7 @@ class Weibo(object):
         if video_download != 0 and video_download != 1:
             sys.exit(u'video_download值应为0或1,请重新输入')
         self.user_id = ''  # 用户id,如昵称为"Dear-迪丽热巴"的id为'1669879400'
+        self.keyword = ''
         self.filter = filter  # 取值范围为0、1,程序默认值为0,代表要爬取用户的全部微博,1代表只爬取用户的原创微博
         self.since_date = since_date  # 起始时间，即爬取发布日期从该值到现在的微博，形式为yyyy-mm-dd
         self.mongodb_write = mongodb_write  # 值为0代表不将结果写入MongoDB数据库,1代表写入
@@ -782,6 +787,8 @@ class Weibo(object):
                 CREATE TABLE IF NOT EXISTS weibo (
                 id varchar(10) NOT NULL,
                 user_id varchar(12),
+                nickname varchar(255),
+                keyword varchar(64),
                 content varchar(2000),
                 original_pictures varchar(1000),
                 retweet_pictures varchar(1000),
@@ -800,15 +807,22 @@ class Weibo(object):
         weibo_list = []
         for weibo in self.weibo[wrote_num:]:
             weibo['user_id'] = self.user_id
+            weibo['nickname'] = self.user['nickname']
             weibo_list.append(weibo)
+            # for keyword in keyword_list:
+            #     if keyword != self.keyword and keyword in weibo['content']:
+            #         weibo['keyword'] = keyword
+            #         weibo['nickname'] = self.user['nickname']
+            #         weibo_list.append(weibo)
         self.mysql_insert(mysql_config, 'weibo', weibo_list)
-        print(u'%d条微博写入MySQL数据库完毕' % self.got_num)
+        # print(u'%d条微博写入MySQL数据库完毕' % self.got_num)
+        print(u'%d条微博写入MySQL数据库完毕' % len(weibo_list))
 
     def write_data(self, wrote_num):
         """将爬取到的信息写入文件或数据库"""
         if self.got_num > wrote_num:
-            self.write_csv(wrote_num)
-            self.write_txt(wrote_num)
+            # self.write_csv(wrote_num)
+            # self.write_txt(wrote_num)
             if self.mysql_write:
                 self.weibo_to_mysql(wrote_num)
             if self.mongodb_write:
@@ -861,19 +875,47 @@ class Weibo(object):
             ]
         return user_id_list
 
-    def initialize_info(self, user_id):
+    def extract_result(self, user_id_list):
+        import pymysql
+        if self.mysql_config:
+            mysql_config = self.mysql_config
+        mysql_config['db'] = 'weibo'
+        connection = pymysql.connect(**mysql_config)
+        cursor = connection.cursor(cursor=pymysql.cursors.DictCursor)
+        for keyword, user_id in user_id_list.items():
+            result_list = []
+            self.initialize_info(user_id, keyword)
+            sql = f"select * from weibo where user_id = '{self.user_id}'"
+            cursor.execute(sql)
+            try:
+                kl = copy.deepcopy(keyword_list)
+                kl.remove(self.keyword)
+                cursor.execute(sql)
+                for row in cursor.fetchall():
+                    for k in kl:
+                        if k in row['content']:
+                            row['keyword'] = k
+                            result_list.append(row)
+                self.mysql_insert(mysql_config, 'weibo_result', result_list)
+            except Exception as e:
+                print(e)
+        else:
+            connection.close()
+
+    def initialize_info(self, user_id, keyword=''):
         """初始化爬虫信息"""
         self.got_num = 0
         self.weibo = []
         self.user = {}
+        self.keyword = keyword
         self.user_id = user_id
         self.weibo_id_list = []
 
     def start(self, user_id_list):
         """运行爬虫"""
         try:
-            for user_id in user_id_list:
-                self.initialize_info(user_id)
+            for keyword, user_id in user_id_list.items():
+                self.initialize_info(user_id, keyword)
                 print('*' * 100)
                 self.get_weibo_info()
                 print(u'信息抓取完毕')
@@ -890,16 +932,16 @@ class Weibo(object):
 def main():
     try:
         # 以下是程序配置信息，可以根据自己需求修改
-        filter = 1  # 值为0表示爬取全部微博（原创微博+转发微博），值为1表示只爬取原创微博
-        since_date = '2018-01-01'  # 起始时间，即爬取发布日期从该值到现在的微博，形式为yyyy-mm-dd
+        filter = 0  # 值为0表示爬取全部微博（原创微博+转发微博），值为1表示只爬取原创微博
+        since_date = '2017-01-01'  # 起始时间，即爬取发布日期从该值到现在的微博，形式为yyyy-mm-dd
         """值为0代表不将结果写入MongoDB数据库,1代表写入；若要写入MongoDB数据库，
         请先安装MongoDB数据库和pymongo，pymongo安装方法为命令行运行:pip install pymongo"""
         mongodb_write = 0
         """值为0代表不将结果写入MySQL数据库,1代表写入;若要写入MySQL数据库，
         请先安装MySQL数据库和pymysql，pymysql安装方法为命令行运行:pip install pymysql"""
-        mysql_write = 0
-        pic_download = 1  # 值为0代表不下载微博原始图片,1代表下载微博原始图片
-        video_download = 1  # 值为0代表不下载微博视频,1代表下载微博视频
+        mysql_write = 1
+        pic_download = 0  # 值为0代表不下载微博原始图片,1代表下载微博原始图片
+        video_download = 0  # 值为0代表不下载微博视频,1代表下载微博视频
 
         wb = Weibo(filter, since_date, mongodb_write, mysql_write,
                    pic_download, video_download)
@@ -931,9 +973,51 @@ def main():
         1729370543 郭碧婷
         比如文件可以叫user_id_list.txt，读取文件中的user_id_list如下所示:
         user_id_list = wb.get_user_list('user_id_list.txt')"""
-        user_id_list = ['1669879400']
+        mysql_config = {
+            'host': 'localhost',
+            'port': 3306,
+            'user': 'root',
+            'password': '',
+            'charset': 'utf8mb4'
+        }
+        wb.change_mysql_config(mysql_config)
+        user_id_list = {
+            '可口可乐': '1795839430',  # 可口可乐
+            '王老吉': '2789871777',  # 王老吉
+            '加多宝': '1687399850',  # 加多宝凉茶
+            '苹果': '1822936141',  # 苹果iPhone中文网
+            '微软': '2381785464',  # 微软中国
+            '麦当劳': '1947211342',  # 麦当劳
+            '汉堡王': '2001185053',  # 汉堡王中国
+            '必胜客': '1898229275',  # 必胜客中国
+            '网易严选': '5627773110',  # 网易严选
+            '吉利汽车': '1691328753',  # 吉利汽车
+            '长城汽车': '1840067451',  # 长城汽车
+            'Jeep': '1669823982',  # Jeep中国站
+            '大众汽车': '3088704885',  # 大众汽车
+            '宝马': '1698264705',  # 宝马中国
+            '奔驰': '1666454854',  # 梅赛德斯-奔驰
+            '本田': '1912067745',  # 本田中国
+            '沃尔沃': '2565395765',  # 沃尔沃汽车中国
+            '奥迪': '1841218153',  # 奥迪
+            '京东': '1717871843',  # 京东
+            '淘宝': '1682454721',  # 淘宝
+            '苏宁': '1769962140',  # 苏宁易购
+            '天猫': '1768198384',  # 天猫
+            '摩拜': '6038290538',  # 摩拜单车mobike
+            'ofo': '5122220173',  # ofo小黄车官方微博
+            '海尔': '1728875812',  # 海尔
+            '高德': '1661169385',  # 高德地图
+            '美的': '3233746751',  # 美的空调官方微博
+            '格力': '1831945750',  # 格力电器
+            '五芳斋': '2105777884',  # 五芳斋
+            '故宫淘宝': '1852493887',  # 故宫淘宝
+            '杜蕾斯': '1942473263',  # 杜蕾斯官方微博
+            '百度': '2525235360',  # 百度
+        }
 
-        wb.start(user_id_list)  # 爬取微博信息
+        # wb.start(user_id_list)  # 爬取微博信息
+        wb.extract_result(user_id_list)
     except Exception as e:
         print('Error: ', e)
         traceback.print_exc()
